@@ -6,7 +6,15 @@ from astropy.coordinates import SkyCoord
 from astropy.table import Table
 from lxml import etree
 
+# Define class to handle target specification in an aptx file
 class Target:
+    """Represent an APT target.
+
+    Parameters
+    ----------
+    elem : lxml etree `_Element` object containing an XML <Target> element
+    """
+
     def __init__(self, elem):
         self.elem = elem
         self.ns = elem.nsmap
@@ -21,6 +29,8 @@ class Target:
         self.pmdecu = elem.find('.//apt:DecProperMotionUnits', self.ns)
 
     def xmldump(self):
+        """Print to screen contents of XML <Target> element.
+        """
         for line in etree.tostring(self.elem).splitlines():
             if '<Target ' not in line and '</Target>' not in line:
                 print(line)
@@ -83,6 +93,35 @@ class Template:
             if '<Template ' not in lstr and '</Template>' not in lstr:
                 print(line)
 
+class MosaicParameters:
+    def __init__(self, elem):
+        self.elem = elem
+        self.ns = elem.nsmap
+        self.ns['apt'] = self.ns.pop(None)
+        self.rows = elem.find('.//apt:Rows', self.ns)
+        self.columns = elem.find('.//apt:Columns', self.ns)
+        self.rowoverlap = elem.find('.//apt:RowOverlapPercent', self.ns)
+        self.coloverlap = elem.find('.//apt:ColumnOverlapPercent', self.ns)
+        self.xskew = elem.find('.//apt:SkewDegreesX', self.ns)
+        self.yskew = elem.find('.//apt:SkewDegreesY', self.ns)
+
+    def summary(self):
+        print("{}={}, {}={}%, {}={} degrees".format(
+                '  Mosaic Rows', self.rows.text,
+                'Overlap', self.rowoverlap.text,
+                'Xskew', self.xskew.text))
+        print("{}={}, {}={}%, {}={} degrees".format(
+                '         Cols', self.columns.text,
+                'Overlap', self.coloverlap.text,
+                'Yskew', self.yskew.text))
+
+    def xmldump(self):
+        key = 'MosaicParameters'
+        for line in etree.tostring(self.elem).splitlines():
+            lstr = line.decode()
+            if '<'+key+'>' not in lstr and '</'+key+'>' not in lstr:
+                print(line)
+
 class Observation:
     def __init__(self, elem):
         self.elem = elem
@@ -103,6 +142,11 @@ class Observation:
         _elem = self.elem.xpath(_xpath, namespaces=self.ns)[0]
         return Template(_elem)
 
+    def mosaic(self):
+        _xpath = './/apt:MosaicParameters'
+        _elem = self.elem.xpath(_xpath, namespaces=self.ns)[0]
+        return MosaicParameters(_elem)
+
     def summary(self):
         print("{}='{}', {}='{}'".format(
                 'Observation Number',self.number.text,
@@ -111,6 +155,19 @@ class Observation:
                 '  TargetID',self.targetid.text))
         temp = self.template()
         temp.summary()
+
+    def update(self,number=None,targetid=None,instrument=None,
+            mosaic=None):
+        if number is not None:
+            self.number.text=number
+        if targetid is not None:
+            self.targetid.text=targetid
+        if instrument is not None:
+            self.instrument.text=instrument
+        if mosaic is not None:
+            _xpath = './/apt:MosaicParameters'
+            _old = self.elem.xpath(_xpath, namespaces=self.ns)[0]
+            _old.getparent().replace(_old, mosaic.elem)
 
 class Proposal:
     def __init__(self, aptxfile):
@@ -143,11 +200,12 @@ class Proposal:
 
     def observation(self, obsnum, name=None):
         _xpath = './/apt:Observation/apt:Number[text()="' + obsnum + '"]'
-        _elem = self.root.xpath(_xpath, namespaces=self.ns)[0]
-        if _elem is not None:
-            return Observation(_elem.getparent())
+        _elem = self.root.xpath(_xpath, namespaces=self.ns)
+        if not _elem:
+            raise ValueError('Proposal has no observation {}'
+                    .format(obsnum))
         else:
-            return None
+            return Observation(_elem[0].getparent())
 
     def obsnums(self):
         _xpath = './/apt:Observation/apt:Number'
@@ -161,7 +219,7 @@ class Proposal:
         for obsnum in self.obsnums():
             self.observation(obsnum).summary()
 
-    def update(self, target=None):
+    def update(self, target=None, observation=None):
         if target is not None:
             _xpath = './/apt:Target/apt:Number[text()="' \
                     + target.number.text + '"]'
@@ -171,6 +229,15 @@ class Proposal:
             else:
                 _oldtarg = _number.getparent()
                 _oldtarg.getparent().replace(_oldtarg, target.elem)
+        if observation is not None:
+            _xpath = './/apt:Observation/apt:Number[text()="' \
+                    + observation.number.text + '"]'
+            _number = self.root.xpath(_xpath, namespaces=self.ns)[0]
+            if _number is None:
+                print('Observation does not exist')
+            else:
+                _oldobs = _number.getparent()
+                _oldobs.getparent().replace(_oldobs, observation.elem)
 
     def write(self, newfile):
         self.zdata[self.xmlfile] = etree.tostring(self.root,

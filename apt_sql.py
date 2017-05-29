@@ -1,56 +1,128 @@
 #!/usr/bin/env python
 
-# Import packages.
 import argparse
+import csv
 from astropy.table import Table
 
-# Command line argument handler.
-parser = argparse.ArgumentParser(
-    description='Show in browser PPSDB table data (.sql) exported by APT.'
-            "\nList available tables, if 'table' is not specified.",
-    epilog='example: aptx_sql.py 98765.sql exposures')
-parser.add_argument('sqlfile',help='SQL file exported by APT')
-parser.add_argument('table',nargs='?',default='',help='PPSDB table name')
-args = parser.parse_args()
+def arguments():
+    """Parse and return command line arguments.
+    """
+    parser = argparse.ArgumentParser(
+        description='Show in browser PPSDB table data (.sql) exported by APT.'
+                "\nList available tables, if 'table' is not specified.",
+        epilog='example: aptx_sql.py 98765.sql exposures')
+    parser.add_argument('sqlfile',help='SQL file exported by APT')
+    parser.add_argument('tablename',nargs='?',default=None,
+            help='Name of a table in the SQL file')
+    return parser.parse_args()
 
-# If table was not specified, print list of tables available in input file.
-prefix='insert into '
-if args.table == '':
-    tlist=list()
-    with open(args.sqlfile, 'r') as f:
-        for line in f:
+class Sqlfile:
+    """An sql file exported by APT.
+    """
+
+    def __init__(self, sqlfile):
+        """Read data from sql file. Get list of tables names.
+        """
+        self.__sqlfile = sqlfile
+        self.__sql = self.sqlread()
+        self.tablenames = self.tablenames()
+
+    def sqlread(self):
+        """Read sql file exported by APT. Strip trailing newlines.
+        """
+        sql = list()
+        with open(self.__sqlfile, 'r') as f:
+            for line in f:
+                sql.append(line.rstrip())
+        return sql
+
+    def tablenames(self):
+        """Parse sql insert statements to determine table names.
+        """
+        prefix = 'insert into '
+        names = list()
+        for line in self.__sql:
             if line[:len(prefix)] == prefix:
-                tlist.append(line[len(prefix):line.find('(')].strip())
-    print('\n'.join(sorted(set(tlist))))
-    exit()
+                names.append(line[len(prefix):line.find('(')].strip())
+        names = sorted(list(set(names)))
+        names.remove('#AOK values')
+        return names
 
-# Read and parse lines that begin with 'insert into <table> '.
-# Store data for each row in a dictionary.
-# Contruct a list of unique keywords for the requested table.
-prefix='insert into '+args.table+' '
-rows=list()
-kset=set()
-with open(args.sqlfile, 'r') as f:
-    for line in f:
-        if line[:len(prefix)] == prefix:
-            kvstr=line[len(prefix):].replace(" ","").rstrip()
-            keystr,valstr=kvstr.split('values')
-            keys=keystr[1:-1].split(',')
-            vals=valstr[1:-1].split(',')
-            rows.append(dict(zip(keys,vals)))
-            kset=kset.union(keys)
-if not rows:
-    print("'"+args.table+"' table data not found in "+args.sqlfile)
-    exit()
-ukeys=sorted(list(kset))
+    def rows_from_sql(self, tablename):
+        """Return dictionary for each row in the specified table.
+        Dictionary keys may differ for each sql insert statement.
+        """
+        prefix = 'insert into ' + tablename + ' '
+        rows = list()
+        for line in self.__sql:
+            if line[:len(prefix)] == prefix:
+                keyval_str = line[len(prefix):].strip()
+                keystr, valstr = keyval_str.split('values')
+                keys = [k.strip() for k in keystr[2:-2].split(',')]
+                vals = [v.strip() for v in valstr[2:-2].split(',')]
+                keyval_dict = dict(zip(keys, vals))
+                rows.append(keyval_dict)
+        return rows
 
-# Load data into astropy table one column at a time.
-# Use empty string for missing entries.
-# Display table in browser.
-out=Table()
-for ukey in ukeys:
-    col=list()
-    for row in rows:
-        col.append(row.get(ukey,''))
-    out[ukey.replace("_"," ")]=col
-out.show_in_browser(jsviewer=True,show_row_index=False)
+    def keys(self, rows):
+        keys = set()
+        for row in rows:
+            keys = keys.union(row.keys())
+        keys = sorted(list(keys))
+        return keys
+
+    def cols_from_rows(self, rows, keys):
+        table = Table()
+        for key in keys:
+            col = list()
+            for row in rows:
+                col.append(row.get(key, ''))
+            try:
+                col = [int(x) for x in col]
+            except ValueError:
+                try:
+                    col = [float(x) for x in col]
+                except ValueError:
+                    col = [x[1:-1] if x.startswith("'") and x.endswith("'") \
+                            else x for x in col]
+            table[key] = col
+        return table
+
+    def table(self, tablename, browser=False):
+        """Construct astropy table from sql insert statements.
+        For the 'exposures' table, discard rows with apt_label == 'BASE'.
+        Convert column data type to integer or float, where possible.
+        Strip beginning and ending single quote from strings.
+        """
+        rows = self.rows_from_sql(tablename)
+        keys = self.keys(rows)
+        if len(keys) == 0:
+            raise Exception("no '" + tablename + "' table in " + self.__sqlfile)
+        table = self.cols_from_rows(rows, keys)
+        if browser:
+            self.browser(table)
+        return table
+
+    def browser(self, table):
+        """Diplay copy of astropy table in a browser window.
+        Convert underscores to spaces in column headers to allow wrapping.
+        """
+        out = table.copy(copy_data=False)
+        for key in out.keys():
+            newkey = key.replace('_', ' ')
+            if newkey != key:
+                out.rename_column(key, newkey)
+        out.show_in_browser(jsviewer=True, show_row_index=False)
+
+def main():
+    args = arguments()
+    sql = Sqlfile(args.sqlfile)
+    if args.tablename:
+        table = sql.table(args.tablename, browser=True)
+    else:
+        print('specify a table name as the second argument:')
+        for name in sql.tablenames:
+            print(name)
+
+if __name__ == "__main__":
+    main()
